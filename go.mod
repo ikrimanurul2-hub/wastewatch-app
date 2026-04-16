@@ -1,6 +1,6 @@
 module wastewatch-app
 
-go 1.26.1
+go 1.20
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
