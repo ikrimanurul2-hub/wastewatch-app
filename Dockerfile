@@ -1,12 +1,14 @@
-# Tahap 1: Build aplikasi
 FROM golang:1.20-alpine AS builder
 WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
+# Copy semua file ke dalam Docker
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .
+# Paksa Docker untuk download dan perbaiki dependencies yang kurang otomatis
+RUN go env -w GOPROXY=direct
+RUN go mod tidy
+# Rakit aplikasinya
+RUN CGO_ENABLED=0 GOOS=linux go build -o main .
 
-# Tahap 2: Setup container super ringan untuk production
+# Setup container untuk production
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /root/
