@@ -1,0 +1,47 @@
+name: Deploy WasteWatch to EC2
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: SSH to EC2 and Deploy Docker Container
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ubuntu
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          # Buat folder jika belum ada dan masuk ke dalamnya
+          mkdir -p ~/wastewatch
+          cd ~/wastewatch
+          
+          # Hapus kode lama, clone yang baru
+          rm -rf app
+          git clone https://github.com/${{ github.repository }}.git app
+          cd app
+          
+          # Hapus container & image lama agar tidak bentrok
+          sudo docker stop wastewatch-container || true
+          sudo docker rm wastewatch-container || true
+          sudo docker rmi wastewatch-image || true
+          
+          # Build image baru dari Dockerfile
+          sudo docker build -t wastewatch-image .
+          
+          # Jalankan container dengan menyuntikkan semua Environment Variables dari GitHub Secrets
+          sudo docker run -d --name wastewatch-container \
+            -p 8080:8080 \
+            -e DB_HOST=${{ secrets.DB_HOST }} \
+            -e DB_USER=${{ secrets.DB_USER }} \
+            -e DB_PASS=${{ secrets.DB_PASS }} \
+            -e S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }} \
+            -e AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
+            -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
+            wastewatch-image
