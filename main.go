@@ -1,47 +1,73 @@
-name: Deploy WasteWatch to EC2
+package main
 
-on:
-  push:
-    branches: [ "main" ]
+import (
+	"database/sql"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout Code
-      uses: actions/checkout@v3
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	_ "github.com/go-sql-driver/mysql"
+)
 
-    - name: SSH to EC2 and Deploy Docker Container
-      uses: appleboy/ssh-action@master
-      with:
-        host: ${{ secrets.EC2_HOST }}
-        username: ec2-user
-        key: ${{ secrets.EC2_SSH_KEY }}
-        script: |
-          # Buat folder jika belum ada dan masuk ke dalamnya
-          mkdir -p ~/wastewatch
-          cd ~/wastewatch
-          
-          # Hapus kode lama, clone yang baru
-          rm -rf app
-          git clone https://github.com/${{ github.repository }}.git app
-          cd app
-          
-          # Hapus container & image lama agar tidak bentrok
-          sudo docker stop wastewatch-container || true
-          sudo docker rm wastewatch-container || true
-          sudo docker rmi wastewatch-image || true
-          
-          # Build image baru dari Dockerfile (DITAMBAH NETWORK HOST AGAR BISA DOWNLOAD GO MOD)
-          sudo docker build --network=host -t wastewatch-image .
-          
-          # Jalankan container dengan menyuntikkan semua Environment Variables dari GitHub Secrets
-          sudo docker run -d --name wastewatch-container \
-            -p 8080:8080 \
-            -e DB_HOST=${{ secrets.DB_HOST }} \
-            -e DB_USER=${{ secrets.DB_USER }} \
-            -e DB_PASS=${{ secrets.DB_PASS }} \
-            -e S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }} \
-            -e AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
-            -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
-            wastewatch-image
+func main() {
+	// Mengambil kredensial dari Environment Variables yang disuntikkan GitHub Actions
+	dbUser := os.Getenv("DB_USER")
+	dbPass := os.Getenv("DB_PASS")
+	dbHost := os.Getenv("DB_HOST")
+	dbName := "wastewatch_db" // Nama database biarkan diketik langsung
+	
+	// Format koneksi ke RDS MySQL
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:3306)/%s", dbUser, dbPass, dbHost, dbName)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		log.Printf("Peringatan: Gagal koneksi ke RDS - %v", err)
+	} else {
+		defer db.Close()
+		fmt.Println("Berhasil inisialisasi koneksi RDS!")
+	}
+
+	// Route untuk halaman utama
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Selamat Datang di WasteWatch - Sistem Pelaporan Sampah")
+	})
+
+	// Route khusus untuk fitur Wajib S3 (Upload Foto Laporan)
+	http.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Gunakan method POST untuk upload", http.StatusMethodNotAllowed)
+			return
+		}
+
+		file, header, err := r.FormFile("foto_sampah")
+		if err != nil {
+			http.Error(w, "Gagal membaca file upload", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		// Inisialisasi Sesi AWS S3 (Region Sydney)
+		sess, err := session.NewSession(&aws.Config{
+			Region: aws.String("ap-southeast-2"), 
+		})
+		
+		uploader := s3manager.NewUploader(sess)
+		_, err = uploader.Upload(&s3manager.UploadInput{
+			Bucket: aws.String(os.Getenv("S3_BUCKET_NAME")),
+			Key:    aws.String("laporan/" + header.Filename),
+			Body:   file,
+		})
+		
+		if err != nil {
+			http.Error(w, "Gagal upload ke S3: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, "Sukses! File %s berhasil disimpan ke S3.", header.Filename)
+	})
+
+	fmt.Println("Server WasteWatch berjalan di port 8080...")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
