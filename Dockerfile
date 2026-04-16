@@ -1,14 +1,18 @@
 FROM golang:1.20-alpine AS builder
+
+# KUNCI JAWABAN: Install git agar go mod bisa download pustaka dari github
+RUN apk add --no-cache git
+
 WORKDIR /app
-# Copy semua file ke dalam Docker
 COPY . .
-# Paksa Docker untuk download dan perbaiki dependencies yang kurang otomatis
+
+# Paksa bikin go.mod baru (jaga-jaga kalau error) dan rakit otomatis
+RUN go mod init wastewatch || true
 RUN go env -w GOPROXY=direct
 RUN go mod tidy
-# Rakit aplikasinya
 RUN CGO_ENABLED=0 GOOS=linux go build -o main .
 
-# Setup container untuk production
+# Setup container super ringan untuk production
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /root/
