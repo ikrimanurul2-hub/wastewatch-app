@@ -13,7 +13,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// Desain UI Halaman Utama (HTML + CSS Bootstrap)
+// Desain UI Utama
 const htmlTemplate = `
 <!DOCTYPE html>
 <html lang="id">
@@ -44,11 +44,14 @@ const htmlTemplate = `
                     <div class="mb-4">
                         <label class="form-label fw-bold">Unggah Foto Bukti</label>
                         <input type="file" name="foto_sampah" class="form-control" accept="image/*" required>
-                        <small class="text-muted">Foto ini akan otomatis disimpan ke dalam AWS S3 Bucket.</small>
+                        <small class="text-muted">Data teks akan disimpan di AWS RDS, foto di AWS S3.</small>
                     </div>
                     <button type="submit" class="btn btn-success w-100 fw-bold">Kirim Laporan</button>
                 </form>
             </div>
+        </div>
+        <div class="text-center mt-4">
+            <a href="/data" class="text-decoration-none text-secondary">Lihat Data Database RDS</a>
         </div>
     </div>
 </body>
@@ -71,20 +74,31 @@ func main() {
 		fmt.Println("Berhasil inisialisasi koneksi RDS MySQL!")
 	}
 
-	// 2. Route Halaman Beranda (Menampilkan Web UI)
+	// [PENTING] OTOMATIS BIKIN TABEL DI RDS JIKA BELUM ADA
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS laporan_sampah (
+		id INT AUTO_INCREMENT PRIMARY KEY,
+		nama VARCHAR(255) NOT NULL,
+		lokasi TEXT NOT NULL,
+		nama_foto VARCHAR(255) NOT NULL,
+		waktu TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`)
+	if err != nil {
+		log.Println("Peringatan: Gagal membuat tabel:", err)
+	}
+
+	// 2. Route Halaman Beranda
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, htmlTemplate)
 	})
 
-	// 3. Route untuk Memproses Upload Data ke AWS S3
+	// 3. Route untuk Memproses Upload Data ke S3 & Insert ke RDS
 	http.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// Batas maksimal ukuran file (10 MB)
 		r.ParseMultipartForm(10 << 20) 
 		nama := r.FormValue("nama")
 		lokasi := r.FormValue("lokasi")
@@ -96,7 +110,14 @@ func main() {
 		}
 		defer file.Close()
 
-		// Buka Sesi ke AWS S3
+		// [PENTING] INSERT DATA TEKS KE DATABASE RDS MYSQL
+		_, err = db.Exec("INSERT INTO laporan_sampah (nama, lokasi, nama_foto) VALUES (?, ?, ?)", nama, lokasi, header.Filename)
+		if err != nil {
+			http.Error(w, "Gagal menyimpan ke Database RDS: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// UPLOAD FILE FOTO KE AWS S3
 		sess, err := session.NewSession(&aws.Config{
 			Region: aws.String("ap-southeast-2"),
 		})
@@ -113,19 +134,48 @@ func main() {
 			return
 		}
 
-		// Balasan Halaman Sukses dengan Konfirmasi HTML
+		// Balasan Halaman Sukses
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprintf(w, `
 			<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 			<div class="container mt-5 text-center" style="max-width: 600px;">
 				<div class="card shadow-sm p-5">
 					<h2 class="text-success fw-bold">✅ Laporan Berhasil Dikirim!</h2>
-					<p class="mt-3">Terima kasih <b>%s</b>. Laporan tumpukan sampah di <b>%s</b> telah kami terima.</p>
-					<p class="text-muted small">File foto <i>%s</i> telah diamankan ke server penyimpanan Cloud AWS S3.</p>
-					<a href="/" class="btn btn-outline-success mt-4">Kembali ke Beranda</a>
+					<p class="mt-3">Data Anda telah diamankan di <b>Database AWS RDS</b>.</p>
+					<p class="text-muted small">File foto <i>%s</i> telah disimpan di <b>AWS S3</b>.</p>
+					<br>
+					<a href="/" class="btn btn-outline-success">Kembali ke Beranda</a>
+					<a href="/data" class="btn btn-primary ms-2">Lihat Data RDS</a>
 				</div>
 			</div>
-		`, nama, lokasi, header.Filename)
+		`, header.Filename)
+	})
+
+	// 4. Fitur Khusus Ujian: Melihat isi Database langsung dari Web
+	http.HandleFunc("/data", func(w http.ResponseWriter, r *http.Request) {
+		rows, err := db.Query("SELECT id, nama, lokasi, nama_foto, waktu FROM laporan_sampah ORDER BY id DESC")
+		if err != nil {
+			http.Error(w, "Gagal mengambil data dari RDS: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `
+			<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+			<div class="container mt-5">
+				<h3 class="text-primary mb-4">📂 Bukti Data Tersimpan di AWS RDS</h3>
+				<table class="table table-bordered table-striped">
+					<thead class="table-dark"><tr><th>ID</th><th>Nama Pelapor</th><th>Lokasi</th><th>Nama File S3</th><th>Waktu Laporan</th></tr></thead>
+					<tbody>
+		`)
+		for rows.Next() {
+			var id int
+			var nama, lokasi, foto, waktu string
+			rows.Scan(&id, &nama, &lokasi, &foto, &waktu)
+			fmt.Fprintf(w, "<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>", id, nama, lokasi, foto, waktu)
+		}
+		fmt.Fprint(w, `</tbody></table><a href="/" class="btn btn-secondary mt-3">Kembali ke Beranda</a></div>`)
 	})
 
 	fmt.Println("Server WasteWatch berjalan di port 8080...")
